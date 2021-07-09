@@ -1,0 +1,83 @@
+package db;
+
+import com.jcraft.jsch.JSch;
+import com.jcraft.jsch.JSchException;
+import com.jcraft.jsch.Session;
+import enums.MySqlSchema;
+import enums.PropertiesReader;
+import lombok.extern.slf4j.Slf4j;
+import utils.MySqlConfigurationsHelper;
+
+import java.sql.*;
+
+@Slf4j
+public class MySqlConnection {
+
+    private static MySqlConnection INSTANCE = null;
+
+    //Configurations
+    private static final String LOCAL_PORT = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("localPort");
+    private static final String SERVER_HOST = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("serverHost");
+    private static final String SERVER_PORT = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("serverPort");
+    private static final String DRIVER_NAME = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("driverName");
+
+    //SSH Credentials
+    private static final String PRIVATE_KEY_PATH = MySqlConfigurationsHelper.getInstance().getPrivateKeyPath();
+    private static final String SSH_HOST = MySqlConfigurationsHelper.getInstance().getSshHost();
+    private static final String SSH_USERNAME = MySqlConfigurationsHelper.getInstance().getSshUsername();
+    private static final String SSH_PASSWORD = MySqlConfigurationsHelper.getInstance().getSshPassword();
+
+    //DB Credentials
+    private static final String DB_USERNAME = MySqlConfigurationsHelper.getInstance().getDbUsername();
+    private static final String DB_PASSWORD = MySqlConfigurationsHelper.getInstance().getDbPassword();
+
+    private MySqlConnection() {
+    }
+
+    public synchronized static MySqlConnection getInstance() {
+        if (INSTANCE == null) {
+            INSTANCE = new MySqlConnection();
+        }
+
+        return INSTANCE;
+    }
+
+    public synchronized Connection getConnection(MySqlSchema mySqlSchema) {
+        String url = "jdbc:mysql://"+SERVER_HOST+":"+LOCAL_PORT+"/"+ mySqlSchema.getName();
+        Connection connection = null;
+        Session session;
+
+        try{
+            java.util.Properties config = new java.util.Properties();
+            config.put("StrictHostKeyChecking", "no");
+            config.put("ConnectionAttempts", "3");
+            JSch jsch = new JSch();
+            session=jsch.getSession(SSH_USERNAME, SSH_HOST, 22);
+            if(PRIVATE_KEY_PATH.isEmpty()) {
+                session.setPassword(SSH_PASSWORD);
+            } else {
+                jsch.addIdentity(PRIVATE_KEY_PATH, SSH_PASSWORD);
+            }
+            session.setConfig(config);
+            session.connect();
+
+            log.info("Connected to {} Schema", mySqlSchema.getName());
+
+            int assinged_port=session.setPortForwardingL(Integer.parseInt(LOCAL_PORT), SERVER_HOST, Integer.parseInt(SERVER_PORT));
+            log.info("Port Forwarded: localhost:"+assinged_port+" -> "+SERVER_HOST+":"+SERVER_PORT);
+
+            Class.forName(DRIVER_NAME);
+            connection = DriverManager.getConnection (url, DB_USERNAME, DB_PASSWORD);
+
+            log.info("Database connection established");
+        } catch (JSchException e) {
+            log.error("Could Not Create SSH Tunnel");
+        } catch (ClassNotFoundException e) {
+            log.error("Could not find Driver for Connection");
+        } catch (SQLException throwables) {
+            log.error("Could not connect to Schema");
+        }
+
+        return connection;
+    }
+}
