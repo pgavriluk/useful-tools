@@ -1,2 +1,2 @@
 # useful-tools
-My usefull Utils
+My useful Utils
