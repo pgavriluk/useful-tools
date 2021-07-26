@@ -1,28 +1,24 @@
 package enums;
 
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Properties;
 
 public enum PropertiesReader {
 
-    MY_SQL_CONFIGURATIONS("src/main/resources/configurations.properties");
+    DB_CONFIGURATIONS("/dbConfigurations.properties");
 
     private Properties properties;
 
-    PropertiesReader(String path){
-        try{
-            FileInputStream input = new FileInputStream(path);
+    PropertiesReader(String file) {
+        try {
             properties = new Properties();
-            properties.load(input);
-
-            input.close();
+            properties.load(PropertiesReader.class.getResourceAsStream(file));
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    public String getProperty(String key){
+    public String getProperty(String key) {
         return properties.getProperty(key);
     }
 }
