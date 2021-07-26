@@ -1,35 +1,31 @@
-package db;
+package connections;
 
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.JSchException;
 import com.jcraft.jsch.Session;
-import enums.MySqlSchema;
+import com.mysql.cj.jdbc.MysqlDataSource;
 import enums.PropertiesReader;
+import enums.db.MySqlSchema;
+import helpers.MySqlConfigurationsHelper;
+import io.qameta.allure.Step;
 import lombok.extern.slf4j.Slf4j;
-import utils.MySqlConfigurationsHelper;
 
-import java.sql.*;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
 
 @Slf4j
 public class MySqlConnection {
 
     private static MySqlConnection INSTANCE = null;
-
-    //Configurations
-    private static final String LOCAL_PORT = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("localPort");
-    private static final String SERVER_HOST = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("serverHost");
-    private static final String SERVER_PORT = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("serverPort");
-    private static final String DRIVER_NAME = PropertiesReader.MY_SQL_CONFIGURATIONS.getProperty("driverName");
-
-    //SSH Credentials
-    private static final String PRIVATE_KEY_PATH = MySqlConfigurationsHelper.getInstance().getPrivateKeyPath();
-    private static final String SSH_HOST = MySqlConfigurationsHelper.getInstance().getSshHost();
-    private static final String SSH_USERNAME = MySqlConfigurationsHelper.getInstance().getSshUsername();
-    private static final String SSH_PASSWORD = MySqlConfigurationsHelper.getInstance().getSshPassword();
-
-    //DB Credentials
-    private static final String DB_USERNAME = MySqlConfigurationsHelper.getInstance().getDbUsername();
-    private static final String DB_PASSWORD = MySqlConfigurationsHelper.getInstance().getDbPassword();
+    private static final Map<MySqlSchema, Connection> liveConnections = new HashMap<>();
+    private static Session session;
 
     private MySqlConnection() {
     }
@@ -42,42 +38,104 @@ public class MySqlConnection {
         return INSTANCE;
     }
 
+    @Step("Get MySql Connection")
     public synchronized Connection getConnection(MySqlSchema mySqlSchema) {
-        String url = "jdbc:mysql://"+SERVER_HOST+":"+LOCAL_PORT+"/"+ mySqlSchema.getName();
-        Connection connection = null;
-        Session session;
+        if (liveConnections.get(mySqlSchema) == null) {
+            String localPort = PropertiesReader.DB_CONFIGURATIONS.getProperty("localPort");
+            String serverHost = PropertiesReader.DB_CONFIGURATIONS.getProperty("serverHost");
+            String serverPort = PropertiesReader.DB_CONFIGURATIONS.getProperty("serverPort");
+            String url = "jdbc:mysql://" + serverHost + ":" + localPort + "/" + mySqlSchema.getName();
+            try {
+                session = openSshSession(localPort, serverHost, serverPort);
 
-        try{
-            java.util.Properties config = new java.util.Properties();
+                String dbUsername = MySqlConfigurationsHelper.getInstance().getDbUsername();
+                String dbPassword = MySqlConfigurationsHelper.getInstance().getDbPassword();
+
+                Class.forName(PropertiesReader.DB_CONFIGURATIONS.getProperty("driverName"));
+
+                MysqlDataSource dataSource = new MysqlDataSource();
+                dataSource.setUser(dbUsername);
+                dataSource.setPassword(dbPassword);
+                dataSource.setURL(url);
+                dataSource.setServerTimezone("UTC");
+
+                Connection connection = dataSource.getConnection();
+                liveConnections.put(mySqlSchema, connection);
+                log.info("Database connection established");
+                log.info("Connected to '{}' Schema", mySqlSchema.getName());
+
+                return connection;
+            } catch (JSchException e) {
+                log.error("Could Not Create SSH Tunnel");
+                e.printStackTrace();
+            } catch (ClassNotFoundException e) {
+                log.error("Could not find Driver for Connection");
+                e.printStackTrace();
+            } catch (SQLException throwable) {
+                log.error("Could not connect to Schema");
+                throwable.printStackTrace();
+            }
+        }
+
+        return liveConnections.get(mySqlSchema);
+    }
+
+    private Session openSshSession(String localPort, String serverHost, String serverPort) throws JSchException {
+        if (session == null) {
+            Properties config = new Properties();
             config.put("StrictHostKeyChecking", "no");
             config.put("ConnectionAttempts", "3");
+
+            String sshHost = MySqlConfigurationsHelper.getInstance().getSshHost();
+            String sshUsername = MySqlConfigurationsHelper.getInstance().getSshUsername();
+            String sshPassword = MySqlConfigurationsHelper.getInstance().getSshPassword();
+            int port = 22;
+
             JSch jsch = new JSch();
-            session=jsch.getSession(SSH_USERNAME, SSH_HOST, 22);
-            if(PRIVATE_KEY_PATH.isEmpty()) {
-                session.setPassword(SSH_PASSWORD);
+            session = jsch.getSession(sshUsername, sshHost, port);
+            if (System.getenv("ENVIRONMENT") == null || System.getenv("ENVIRONMENT").equalsIgnoreCase("staging")) {
+                try {
+                    Path tempFile = Files.createTempFile("id-", "-rsa");
+                    Files.write(tempFile, RsaKey.getPrkey().getBytes(StandardCharsets.UTF_8));
+                    jsch.addIdentity(tempFile.toUri().getPath(), sshPassword);
+                    Files.delete(tempFile);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
             } else {
-                jsch.addIdentity(PRIVATE_KEY_PATH, SSH_PASSWORD);
+                session.setPassword(sshPassword);
             }
             session.setConfig(config);
             session.connect();
 
-            log.info("Connected to {} Schema", mySqlSchema.getName());
+            if (session.isConnected()) {
+                log.info("SSH Tunnel was opened at :" + sshHost + ":" + port);
+            } else {
+                throw new Error("Couldn't establish connection to SSH Tunnel");
+            }
 
-            int assinged_port=session.setPortForwardingL(Integer.parseInt(LOCAL_PORT), SERVER_HOST, Integer.parseInt(SERVER_PORT));
-            log.info("Port Forwarded: localhost:"+assinged_port+" -> "+SERVER_HOST+":"+SERVER_PORT);
-
-            Class.forName(DRIVER_NAME);
-            connection = DriverManager.getConnection (url, DB_USERNAME, DB_PASSWORD);
-
-            log.info("Database connection established");
-        } catch (JSchException e) {
-            log.error("Could Not Create SSH Tunnel");
-        } catch (ClassNotFoundException e) {
-            log.error("Could not find Driver for Connection");
-        } catch (SQLException throwables) {
-            log.error("Could not connect to Schema");
+            int assigned_port = session.setPortForwardingL(Integer.parseInt(localPort), serverHost, Integer.parseInt(serverPort));
+            log.info("Port Forwarded: localhost:" + assigned_port + " -> " + serverHost + ":" + serverPort);
         }
 
-        return connection;
+        return session;
     }
+
+    public synchronized void closeConnection() {
+        liveConnections.forEach((schema, connection) -> {
+            if (connection != null) {
+                try {
+                    connection.close();
+                    log.info("Connection to '{}' was closed.", schema);
+                } catch (SQLException throwable) {
+                    throwable.printStackTrace();
+                }
+            }
+        });
+
+        if (session != null) {
+            session.disconnect();
+        }
+    }
+
 }
